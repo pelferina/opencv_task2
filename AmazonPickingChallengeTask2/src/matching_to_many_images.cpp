@@ -9,6 +9,7 @@
 using namespace cv;
 using namespace std;
 
+string applName;
 const string source_window = "Source Image";
 
 static void createWindows()
@@ -22,6 +23,115 @@ static void printPrompt( const string& applName )
     cout << endl << "Format:\n" << endl;
     cout << "./" << applName << " [part1TextFileDir] [part2TextFileDir] [dirToSaveFinalImages]" << endl;
     cout << endl;
+    exit(1);
+}
+
+
+static void maskMatchesByTrainImgIdx( const vector<DMatch>& matches, int trainImgIdx, vector<char>& mask )
+{
+    mask.resize( matches.size() );
+    fill( mask.begin(), mask.end(), 0 );
+    for( size_t i = 0; i < matches.size(); i++ )
+    {
+        if( matches[i].imgIdx == trainImgIdx )
+            mask[i] = 1;
+    }
+}
+
+static bool createDetectorDescriptorMatcher( const string& detectorType, const string& descriptorType, const string& matcherType,
+                                      Ptr<FeatureDetector>& featureDetector,
+                                      Ptr<DescriptorExtractor>& descriptorExtractor,
+                                      Ptr<DescriptorMatcher>& descriptorMatcher )
+{
+    cout << "< Creating feature detector, descriptor extractor and descriptor matcher ..." << endl;
+    featureDetector = FeatureDetector::create( detectorType );
+    descriptorExtractor = DescriptorExtractor::create( descriptorType );
+    descriptorMatcher = DescriptorMatcher::create( matcherType );
+    cout << ">" << endl;
+
+    bool isCreated = !( featureDetector.empty() || descriptorExtractor.empty() || descriptorMatcher.empty() );
+    if( !isCreated )
+        cout << "Can not create feature detector or descriptor extractor or descriptor matcher of given types." << endl << ">" << endl;
+
+    return isCreated;
+}
+
+static void detectKeypoints( const Mat& queryImage, vector<KeyPoint>& queryKeypoints,
+                      const vector<Mat>& trainImages, vector<vector<KeyPoint> >& trainKeypoints,
+                      Ptr<FeatureDetector>& featureDetector )
+{
+	//-- Step 1: Detect the keypoints using SURF Detector
+	int minHessian = 400;
+
+	SurfFeatureDetector detector( minHessian );
+    cout << endl << "< Extracting keypoints from images..." << endl;
+    detector.detect( queryImage, queryKeypoints );
+    detector.detect( trainImages, trainKeypoints );
+    cout << ">" << endl;
+}
+
+static void computeDescriptors( const Mat& queryImage, vector<KeyPoint>& queryKeypoints, Mat& queryDescriptors,
+                         const vector<Mat>& trainImages, vector<vector<KeyPoint> >& trainKeypoints, vector<Mat>& trainDescriptors,
+                         Ptr<DescriptorExtractor>& descriptorExtractor )
+{
+    cout << "< Computing descriptors for keypoints..." << endl;
+    SurfDescriptorExtractor extractor;
+
+    extractor.compute( queryImage, queryKeypoints, queryDescriptors );
+    descriptorExtractor->compute( trainImages, trainKeypoints, trainDescriptors );
+
+    int totalTrainDesc = 0;
+    for( vector<Mat>::const_iterator tdIter = trainDescriptors.begin(); tdIter != trainDescriptors.end(); tdIter++ )
+        totalTrainDesc += tdIter->rows;
+
+    cout << "Query descriptors count: " << queryDescriptors.rows << "; Total train descriptors count: " << totalTrainDesc << endl;
+    cout << ">" << endl;
+}
+
+static void matchDescriptors( const Mat& queryDescriptors, const vector<Mat>& trainDescriptors,
+                       vector<DMatch>& matches, Ptr<DescriptorMatcher>& descriptorMatcher )
+{
+    cout << "< Set train descriptors collection in the matcher and match query descriptors to them..." << endl;
+    TickMeter tm;
+
+    tm.start();
+    descriptorMatcher->add( trainDescriptors );
+    descriptorMatcher->train();
+    tm.stop();
+    double buildTime = tm.getTimeMilli();
+
+    tm.start();
+    descriptorMatcher->match( queryDescriptors, matches );
+    tm.stop();
+    double matchTime = tm.getTimeMilli();
+
+    CV_Assert( queryDescriptors.rows == (int)matches.size() || matches.empty() );
+
+    cout << "Number of matches: " << matches.size() << endl;
+    cout << "Build time: " << buildTime << " ms; Match time: " << matchTime << " ms" << endl;
+    cout << ">" << endl;
+}
+
+static void saveResultImages( const Mat& queryImage, const vector<KeyPoint>& queryKeypoints,
+                       const vector<Mat>& trainImages, const vector<vector<KeyPoint> >& trainKeypoints,
+                       const vector<DMatch>& matches, const vector<string>& trainImagesNames, const string& resultDir )
+{
+    cout << "< Save results..." << endl;
+    Mat drawImg;
+    vector<char> mask;
+    for( size_t i = 0; i < trainImages.size(); i++ )
+    {
+        if( !trainImages[i].empty() )
+        {
+            maskMatchesByTrainImgIdx( matches, (int)i, mask );
+            drawMatches( queryImage, queryKeypoints, trainImages[i], trainKeypoints[i],
+                         matches, drawImg, Scalar(255, 0, 0), Scalar(0, 255, 255), mask );
+            string filename = resultDir + "/res_" + trainImagesNames[i];
+            if( !imwrite( filename, drawImg ) )
+                cout << "Image " << filename << " can not be saved (may be because directory " << resultDir << " does not exist)." << endl;
+        }
+    }
+    cout << ">" << endl;
 }
 
 static void readImages( const string fileDir, string& imageDirName, vector<string>& imageFileNames )
@@ -50,10 +160,9 @@ static void readImages( const string fileDir, string& imageDirName, vector<strin
     file.close();
 }
 
-static bool readImagesFromFile(const string& textFileDir, vector <Mat>& images, int flag)
+static bool readImagesFromFile(const string& textFileDir, vector <Mat>& images, vector<string> &imageFileNames, int flag)
 {
 	string imageDirName;
-	vector<string> imageFileNames;
 	cout<<"<"<<endl;
 	readImages(textFileDir, imageDirName, imageFileNames);
 
@@ -90,9 +199,39 @@ static bool readImagesFromFile(const string& textFileDir, vector <Mat>& images, 
 	return true;
 }
 
+static void part1Execute(string applName, vector<Mat> images, vector<string> trainImagesNames, const string dirToSaveFinalImages)
+{
+	Ptr<FeatureDetector> featureDetector;
+	Ptr<DescriptorExtractor> descriptorExtractor = new BriefDescriptorExtractor;
+	Ptr<DescriptorMatcher> descriptorMatcher;
+
+	if( !createDetectorDescriptorMatcher( "SURF", "SURF", "FlannBased", featureDetector, descriptorExtractor, descriptorMatcher ) )
+	{
+		printPrompt(applName);
+	}
+
+	vector<KeyPoint> queryKeypoints;
+	vector<vector<KeyPoint> > trainKeypoints;
+
+	Mat queryImage = images[0];
+	vector<Mat> trainImages (images.begin() + 1, images.end());
+	detectKeypoints( queryImage, queryKeypoints, trainImages, trainKeypoints, featureDetector );
+	Mat queryDescriptors;
+	vector<Mat> trainDescriptors;
+	computeDescriptors( queryImage, queryKeypoints, queryDescriptors,
+						trainImages, trainKeypoints, trainDescriptors,
+						descriptorExtractor );
+
+	vector<DMatch> matches;
+	matchDescriptors( queryDescriptors, trainDescriptors, matches, descriptorMatcher );
+
+	saveResultImages( queryImage, queryKeypoints, trainImages, trainKeypoints,
+					  matches, trainImagesNames, dirToSaveFinalImages );
+}
+
 int main(int argc, char** argv)
 {
-	const string applName = argv[0];
+	applName = argv[0];
     if( argc <= 2)
     {
        printPrompt(applName);
@@ -103,21 +242,11 @@ int main(int argc, char** argv)
     const string dirToSaveFinalImages = argv[3];
 
     vector<Mat> part1Images, part2Images;
+	vector<string> imageFileNamesPart1, imageFileNamesPart2;
 
-    if(readImagesFromFile(part1TextFile, part1Images, CV_LOAD_IMAGE_GRAYSCALE) &&
-    		readImagesFromFile(part2TextFile, part2Images, IMREAD_COLOR))
+    if(readImagesFromFile(part1TextFile, part1Images, imageFileNamesPart1, CV_LOAD_IMAGE_GRAYSCALE) &&
+    		readImagesFromFile(part2TextFile, part2Images, imageFileNamesPart2, IMREAD_COLOR))
     {
-    	createWindows();
-    	for(int i = 0; i < part1Images.size(); i++)
-    	{
-    		imshow(source_window, part1Images[i]);
-    		waitKey(1000);
-    	}
-    	for(int i = 0; i < part2Images.size(); i++)
-		{
-			imshow(source_window, part2Images[i]);
-			waitKey(1000);
-		}
-
+    	part1Execute(applName, part1Images, imageFileNamesPart1, dirToSaveFinalImages);
     }
 }
