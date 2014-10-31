@@ -1,6 +1,4 @@
-#include "opencv2/highgui/highgui.hpp"
-#include "opencv2/features2d/features2d.hpp"
-#include "opencv2/contrib/contrib.hpp"
+#include "opencv2/opencv.hpp"
 #include "opencv2/nonfree/features2d.hpp"
 
 #include <iostream>
@@ -11,11 +9,14 @@ using namespace std;
 
 string applName;
 const string source_window = "Source Image";
+const string result_window = "Result Image";
+
 
 static void createWindows()
 {
 	/// Create windows
 	namedWindow( source_window, CV_WINDOW_NORMAL );
+	namedWindow( result_window, CV_WINDOW_NORMAL );
 }
 
 static void printPrompt( const string& applName )
@@ -26,6 +27,92 @@ static void printPrompt( const string& applName )
     exit(1);
 }
 
+/* Finds Region of interest within image
+ * @param x,y coordinates of the leftmost corner of the desired rectangular region
+ * @return roi Rectangular regions of interest
+ */
+Rect findroi(int x, int y)
+{
+	// Setup a Region Of Interest
+	cv::Rect roi;
+	roi.x = x;
+	roi.y = y;
+	roi.width = 2160;
+	roi.height = 1216;
+
+	return roi;
+}
+
+/*
+ *  Transforms the corners of the chessboard
+ * to be consistent with the resulting image
+ */
+void perspectiveTransformation(Mat src, vector<Point> corners, Mat &quad)
+{
+
+	// Define the corners of the destination image
+	std::vector<cv::Point2f> quad_pts;
+	quad_pts.push_back(cv::Point2f(0, 0));
+	quad_pts.push_back(cv::Point2f(quad.cols, 0));
+	quad_pts.push_back(cv::Point2f(quad.cols, quad.rows));
+	quad_pts.push_back(cv::Point2f(0, quad.rows));
+
+	//Define the center points of the chessboards for transformation
+	vector<Point2f>points;
+	points.push_back(corners[0]);
+	points.push_back(corners[1]);
+	points.push_back(corners[2]);
+	points.push_back(corners[3]);
+
+	// Get transformation matrix
+	cv::Mat transmtx = cv::getPerspectiveTransform(points, quad_pts);
+
+	// Apply perspective transformation
+	cv::warpPerspective(src, quad, transmtx, quad.size());
+}
+
+/* Finds Chess board Patterns
+ * @img Corner Rectangles of the src
+ * @param corners Centers of the chessboard patterns
+ * @param result Index of the corner
+ */
+static void findChessboardPatterns(Mat &img, vector<Point> &corners, int result)
+{
+	Mat result1, result2, result3, result4;
+
+	//Board width and height to be found
+	int board_w = 3;
+	int board_h = 3;
+
+	bool found = false;
+
+	vector<Point2f> ptvec;
+
+	Size boardSize = Size( board_w, board_h );
+
+	//Find the chess board pattern
+	found = findChessboardCorners( img, boardSize, ptvec, CALIB_CB_ADAPTIVE_THRESH | CALIB_CB_FAST_CHECK | CALIB_CB_NORMALIZE_IMAGE);
+
+	if (found)
+	{
+	  Mat viewGray;
+	  cvtColor(img, viewGray, COLOR_BGR2GRAY);
+	  cornerSubPix( viewGray, ptvec, Size(11,11),
+	  Size(-1,-1), TermCriteria( TermCriteria::EPS+TermCriteria::MAX_ITER, 30, 0.1 ));
+
+	  //Adding the approximate centers to the corners vector
+	  if(result == 2)
+		  ptvec[4].x += 2160;
+	  else if(result == 3)
+		  ptvec[4].y += 1216;
+	  else if(result == 4)
+	  {
+		  ptvec[4].x += 2160;
+		  ptvec[4].y += 1216;
+	  }
+	  corners.push_back(ptvec[4]);
+	}
+}
 
 static void maskMatchesByTrainImgIdx( const vector<DMatch>& matches, int trainImgIdx, vector<char>& mask )
 {
@@ -229,6 +316,49 @@ static void part1Execute(string applName, vector<Mat> images, vector<string> tra
 					  matches, trainImagesNames, dirToSaveFinalImages );
 }
 
+static void part2Execute(string applName, Mat src, string imageName, string location)
+{
+	Mat result2, result3, result4;
+	vector<Point> corners;
+
+	// Crop the original image to the area defined by ROI (Regions of Interest)
+	// ROI = Four corners of the image for ease of finding chess board patterns within these areas
+	result4 = src(findroi(2160, 1216));
+	result2 = src(findroi(2160, 0));
+	result3 = src(findroi(0, 1216));
+
+	// Manually determine the first chessboard pattern's center as
+	// it is unrecognizable in the image
+	Point tl;
+	tl.x = 1050;
+	tl.y = 200;
+	corners.push_back(tl);
+
+	// Find the rest of the chessboard patterns
+	// and approximate their centers
+	findChessboardPatterns(result2, corners, 2);
+	findChessboardPatterns(result4, corners, 4);
+	findChessboardPatterns(result3, corners, 3);
+
+	createWindows();
+
+	//Show Original Image
+	imshow( source_window, src);
+
+	// Define the destination image as required
+	Mat quad = cv::Mat::zeros(540, 960, CV_32FC2);
+
+	//Transform the perspective with the given corners
+	perspectiveTransformation(src, corners, quad);
+
+	string filename = location + "/" + imageName;
+	if( !imwrite( filename, quad ) )
+		cout << "Image " << filename << " can not be saved (may be because directory " << location << " does not exist)." << endl;
+	//Show Transformed Image
+	imshow(result_window, quad);
+	waitKey(0);
+}
+
 int main(int argc, char** argv)
 {
 	applName = argv[0];
@@ -248,5 +378,6 @@ int main(int argc, char** argv)
     		readImagesFromFile(part2TextFile, part2Images, imageFileNamesPart2, IMREAD_COLOR))
     {
     	part1Execute(applName, part1Images, imageFileNamesPart1, dirToSaveFinalImages);
+    	part2Execute(applName, part2Images[0], imageFileNamesPart2[0], dirToSaveFinalImages);	//since there is only one image for part 2
     }
 }
